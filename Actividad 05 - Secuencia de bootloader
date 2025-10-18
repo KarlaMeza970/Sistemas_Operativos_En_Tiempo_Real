@@ -1,0 +1,147 @@
+// Materia: Sistemas Operativos en Tiempo Real
+// Grupo: 3MM7
+// Ejercicio: Toggle LEDS y Switch (RTOS)
+
+// ================= Configuración de núcleos =================
+#if CONFIG_FREERTOS_UNICORE
+  // Si FreeRTOS está configurado para un solo núcleo
+  static const BaseType_t app_cpu = 0;
+#else
+  // Si se usan dos núcleos
+  static const BaseType_t app_cpu = 1; 
+#endif
+
+// Declaración de Pines 
+const int ledPin1 = 2;  // LED Verde
+const int ledPin2 = 5;  // LED Azul 
+const int ledPin3 = 4;  // LED Rojo
+const int PinLed  = 18; // LED Amarillo (controlado por botones)
+const int Boton1  = 19; // Botón 1
+const int Boton2  = 21; // Botón 2
+
+// Variables LEDs toggle (Valores en milisegundos)
+const unsigned long tiempoSalida1 = 500;  // Verde
+const unsigned long tiempoSalida2 = 383;  // Azul
+const unsigned long tiempoSalida3 = 10;  // Rojo 
+
+// Variables finitas de estados en respuesta a las entradas (Botones-Secuencia)
+int state = 0; //Estado actual.
+unsigned long ledOnTime = 0; //Tiempo en que se encendio el led Amarillo
+unsigned long pressStart = 0;//Guarda el tiempo en que comienza la detección de la pulsación.
+bool ledActive = false;//Indicador
+
+//Handles de tareas para almacenar refrencias de tareas. 
+TaskHandle_t tareaLEDs;
+TaskHandle_t tareaSwitch;
+
+// ================== Tarea LEDs toggle ==================
+void taskToggleLEDs(void *parameter) {
+  bool LedVerde = LOW;
+  bool LedAzul  = LOW;
+  bool LedRojo  = LOW;
+
+  for (;;) {
+    // LED Verde
+    LedVerde = !LedVerde;
+    digitalWrite(ledPin1, LedVerde);
+    vTaskDelay(tiempoSalida1 / portTICK_PERIOD_MS / 2);
+
+    // LED Azul
+    LedAzul = !LedAzul;
+    digitalWrite(ledPin2, LedAzul);
+    vTaskDelay(tiempoSalida2 / portTICK_PERIOD_MS / 2);
+
+    // LED Rojo
+    LedRojo = !LedRojo;
+    digitalWrite(ledPin3, LedRojo);
+    vTaskDelay(tiempoSalida3 / portTICK_PERIOD_MS / 2);
+  }
+}
+
+// ================== Tarea Switch FSM ==================
+void taskSwitchFSM(void *parameter) {
+  for (;;) {
+    bool s1 = !digitalRead(Boton1); // activo en LOW
+    bool s2 = !digitalRead(Boton2);
+
+    switch (state) {
+      case 0://Estado inicial esperando que ambos botones se presionen.
+        if (s1 && s2) state = 1;
+        break;
+      case 1://Se detecta que solo queda presionado Boton 2.
+        if (!s1 && s2) state = 2;
+        break;
+      case 2://Se liberan ambos botones.
+        if (!s1 && !s2) state = 3;
+        break;
+      case 3://Se detecta que vulve a presionar el Boton 2
+        if (s2 && !s1) state = 4;
+        break;
+      case 4://se presioan ambos otra vez
+        if (s1 && s2) {
+          pressStart = millis();//Preparación de temporización.
+          state = 6;
+        }
+        break;
+      case 6: //Se reliza la validación en donde permanece presionados >= 1seg
+        if (s1 && s2 && (millis() - pressStart >= 1000)) {
+          digitalWrite(PinLed, HIGH);
+          ledOnTime = millis();
+          ledActive = true;
+          state = 5;
+        } else if (!s1 || !s2) {
+          state = 0;
+        }
+        break;
+      case 5://LED encendido 2seg, paar regresar al estado inical (ESTADO--> 0)
+        if (ledActive && millis() - ledOnTime >= 2000) {
+          digitalWrite(PinLed, LOW);
+          ledActive = false;
+          state = 0;
+        }
+        break;
+    }
+
+    vTaskDelay(50 / portTICK_PERIOD_MS); // evitar rebotes y liberar CPU
+  }
+}
+
+// ================== Setup ==================
+void setup() {
+  // Configuración de pines
+  pinMode(ledPin1, OUTPUT);
+  pinMode(ledPin2, OUTPUT);
+  pinMode(ledPin3, OUTPUT);
+  pinMode(PinLed, OUTPUT);
+  pinMode(Boton1, INPUT_PULLUP);
+  pinMode(Boton2, INPUT_PULLUP);
+
+  digitalWrite(ledPin1, LOW);
+  digitalWrite(ledPin2, LOW);
+  digitalWrite(ledPin3, LOW);
+  digitalWrite(PinLed, LOW);
+
+  // Crear tareas en FreeRTOS
+  xTaskCreatePinnedToCore(
+    taskToggleLEDs,
+    "Tarea LEDs",
+    2048,
+    NULL,
+    1,
+    &tareaLEDs,
+    app_cpu
+  );
+
+  xTaskCreatePinnedToCore(
+    taskSwitchFSM,
+    "Tarea Switch FSM",
+    2048,
+    NULL,
+    1,
+    &tareaSwitch,
+    app_cpu
+  );
+}
+
+void loop() {  
+}
