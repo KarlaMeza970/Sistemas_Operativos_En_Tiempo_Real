@@ -1,0 +1,135 @@
+//==============================
+// Núcleos
+#if CONFIG_FREERTOS_UNICORE
+  static const BaseType_t app_cpu = 0;
+#else
+  static const BaseType_t app_cpu = 1;
+#endif
+
+// Pines de LEDs
+static const int led_pin1 = 12;
+static const int led_pin2 = 8;
+static const int led_pin3 = 10;
+
+// Variables globales
+int cont = 0;
+bool led1 = true;
+bool led2 = true;
+bool led3 = false;
+
+// Timers
+static TimerHandle_t auto_reload_timer1 = NULL;
+static TimerHandle_t auto_reload_timer2 = NULL;
+static TimerHandle_t auto_reload_timer3 = NULL;
+static TimerHandle_t auto_reload_timerSync = NULL; // <-- nuevo timer de sincronización
+
+//----------------------------------------
+// CALLBACKS DE LOS TIMERS PRINCIPALES
+void myTimerCallback1(TimerHandle_t xTimer){
+  if((uint32_t) pvTimerGetTimerID(xTimer) == 1){
+    digitalWrite(led_pin1, LOW);
+    digitalWrite(led_pin2, HIGH);
+    xTimerStart(auto_reload_timer2, portMAX_DELAY);
+    xTimerStop(auto_reload_timer1, portMAX_DELAY);
+  }
+}
+
+void myTimerCallback2(TimerHandle_t xTimer){
+  if((uint32_t) pvTimerGetTimerID(xTimer) == 1){
+    if(cont <= 3 ){
+      led2 = !led2;
+      digitalWrite(led_pin2, led2);
+      cont++;
+    }
+    else{
+      cont=0;
+      digitalWrite(led_pin2, LOW);
+      xTimerStop(auto_reload_timer2, portMAX_DELAY);
+      digitalWrite(led_pin3, HIGH);
+      xTimerStart(auto_reload_timer3, portMAX_DELAY);
+    }
+  }
+}
+
+void myTimerCallback3(TimerHandle_t xTimer){
+  if((uint32_t) pvTimerGetTimerID(xTimer) == 1){
+    digitalWrite(led_pin3, LOW);
+    xTimerStop(auto_reload_timer3, portMAX_DELAY);
+    xTimerStart(auto_reload_timer1, portMAX_DELAY);
+    digitalWrite(led_pin1, HIGH);
+  }
+}
+
+//----------------------------------------
+// NUEVO: CALLBACK DEL TIMER DE SINCRONIZACIÓN
+void myTimerSyncCallback(TimerHandle_t xTimer){
+  Serial.println(" Sincronizando timers...");
+
+  // Apagar todos los timers actuales
+  xTimerStop(auto_reload_timer1, portMAX_DELAY);
+  xTimerStop(auto_reload_timer2, portMAX_DELAY);
+  xTimerStop(auto_reload_timer3, portMAX_DELAY);
+
+  // Reiniciar variables y LEDs al estado inicial
+  cont = 0;
+  led1 = true;
+  led2 = false;
+  led3 = false;
+
+  digitalWrite(led_pin1, HIGH);
+  digitalWrite(led_pin2, LOW);
+  digitalWrite(led_pin3, LOW);
+
+  // Reiniciar el ciclo desde el Timer1
+  xTimerStart(auto_reload_timer1, portMAX_DELAY);
+
+  Serial.println("Timers sincronizados y reiniciados.");
+}
+
+//----------------------------------------
+void setup(){
+  pinMode(led_pin1, OUTPUT);
+  pinMode(led_pin2, OUTPUT);
+  pinMode(led_pin3, OUTPUT);
+
+  digitalWrite(led_pin1, HIGH);
+  digitalWrite(led_pin2, LOW);
+  digitalWrite(led_pin3, LOW);
+
+  Serial.begin(115200);
+  Serial.println("Inicializando...");
+
+  // Crear timers
+  auto_reload_timer1 = xTimerCreate("Timer1",
+                      2000/portTICK_PERIOD_MS,
+                      pdTRUE,
+                      (void *)1,
+                      myTimerCallback1);
+
+  auto_reload_timer2 = xTimerCreate("Timer2",
+                      400/portTICK_PERIOD_MS,
+                      pdTRUE,
+                      (void *)1,
+                      myTimerCallback2);
+
+  auto_reload_timer3 = xTimerCreate("Timer3",
+                      2000/portTICK_PERIOD_MS,
+                      pdTRUE,
+                      (void *)1,
+                      myTimerCallback3);
+
+  // NUEVO: Timer de sincronización
+  auto_reload_timerSync = xTimerCreate("TimerSync",
+                      10000/portTICK_PERIOD_MS,  // Cada 10 segundos sincroniza
+                      pdTRUE,                    // Auto-reload
+                      (void *)1,
+                      myTimerSyncCallback);
+
+  // Iniciar timers
+  xTimerStart(auto_reload_timer1, portMAX_DELAY);   // Inicia el ciclo
+  xTimerStart(auto_reload_timerSync, portMAX_DELAY); // Inicia el reloj maestro
+}
+
+void loop(){
+  // FreeRTOS maneja todo
+}
