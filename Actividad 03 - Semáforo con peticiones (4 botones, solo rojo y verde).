@@ -1,0 +1,120 @@
+#if CONFIG_FREERTOS_UNICORE
+  static const BaseType_t nucleo_app = 0;
+#else
+  static const BaseType_t nucleo_app = 1;
+#endif
+
+// ==============================
+// Pines para semáforo A y B
+// ==============================
+const int LED_ROJO_A   = 19;
+const int LED_VERDE_A  = 5;
+const int LED_ROJO_B   = 17;
+const int LED_VERDE_B  = 4;
+
+// Pines de sensores (switches)
+const int BTN_A_ENTRADA = 0;   // coche detectado en semáforo A
+const int BTN_B_ENTRADA = 2;   // coche detectado en semáforo B
+const int BTN_A_SALIDA  = 16;  // coche A salió
+const int BTN_B_SALIDA  = 21;  // coche B salió
+
+// Manejador del semáforo (mutex de carretera)
+SemaphoreHandle_t mutex_carretera;
+
+// Declaraciones de tareas
+void tareaSemA(void *param);
+void tareaSemB(void *param);
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("Sistema de control de tráfico iniciado con FreeRTOS.");
+
+  // Configurar pines de salida (LEDs)
+  pinMode(LED_ROJO_A, OUTPUT);
+  pinMode(LED_VERDE_A, OUTPUT);
+  pinMode(LED_ROJO_B, OUTPUT);
+  pinMode(LED_VERDE_B, OUTPUT);
+
+  // Configurar entradas con resistencias pull-up
+  pinMode(BTN_A_ENTRADA, INPUT_PULLUP);
+  pinMode(BTN_B_ENTRADA, INPUT_PULLUP);
+  pinMode(BTN_A_SALIDA, INPUT_PULLUP);
+  pinMode(BTN_B_SALIDA, INPUT_PULLUP);
+
+  // Estado inicial de los semáforos
+  digitalWrite(LED_ROJO_A, HIGH);
+  digitalWrite(LED_VERDE_A, LOW);
+  digitalWrite(LED_ROJO_B, HIGH);
+  digitalWrite(LED_VERDE_B, LOW);
+
+  // Crear mutex de la carretera compartida
+  mutex_carretera = xSemaphoreCreateMutex();
+
+  // Crear tareas para ambos semáforos
+  xTaskCreatePinnedToCore(tareaSemA, "Semaforo_A", 2048, NULL, 1, NULL, nucleo_app);
+  xTaskCreatePinnedToCore(tareaSemB, "Semaforo_B", 2048, NULL, 1, NULL, nucleo_app);
+}
+
+void loop() {
+  // FreeRTOS maneja las tareas, no se usa el loop()
+}
+
+// ==============================
+// TAREA SEMÁFORO A
+// ==============================
+void tareaSemA(void *param) {
+  for (;;) {
+    // Detectar si hay un coche esperando
+    if (digitalRead(BTN_A_ENTRADA) == LOW) {
+      // Solicitar acceso a la carretera
+      if (xSemaphoreTake(mutex_carretera, portMAX_DELAY) == pdTRUE) {
+        // Permitir paso
+        digitalWrite(LED_ROJO_A, LOW);
+        digitalWrite(LED_VERDE_A, HIGH);
+
+        // Esperar hasta que el coche salga
+        while (digitalRead(BTN_A_SALIDA) == HIGH) {
+          vTaskDelay(pdMS_TO_TICKS(100));
+        }
+
+        // Coche salió, cerrar paso
+        digitalWrite(LED_VERDE_A, LOW);
+        digitalWrite(LED_ROJO_A, HIGH);
+
+        // Liberar acceso a la carretera
+        xSemaphoreGive(mutex_carretera);
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+}
+
+// ==============================
+// TAREA SEMÁFORO B
+// ==============================
+void tareaSemB(void *param) {
+  for (;;) {
+    // Detectar coche en espera
+    if (digitalRead(BTN_B_ENTRADA) == LOW) {
+      // Intentar tomar el mutex (carretera)
+      if (xSemaphoreTake(mutex_carretera, portMAX_DELAY) == pdTRUE) {
+        // Dar paso al coche
+        digitalWrite(LED_ROJO_B, LOW);
+        digitalWrite(LED_VERDE_B, HIGH);
+
+        // Esperar hasta que salga
+        while (digitalRead(BTN_B_SALIDA) == HIGH) {
+          vTaskDelay(pdMS_TO_TICKS(100));
+        }
+
+        // Termina el cruce
+        digitalWrite(LED_VERDE_B, LOW);
+        digitalWrite(LED_ROJO_B, HIGH);
+
+        // Liberar mutex
+        xSemaphoreGive(mutex_carretera);
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+}
