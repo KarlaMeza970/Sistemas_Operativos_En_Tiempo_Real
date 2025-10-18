@@ -1,0 +1,193 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <Keypad.h>
+
+// --- CONFIGURACIÓN DEL NÚCLEO PARA FreeRTOS ---
+// Si el ESP32 tiene un solo núcleo habilitado, se usa el 0, de lo contrario el 1
+#if CONFIG_FREERTOS_UNICORE
+  static const BaseType_t app_cpu = 0;
+#else
+  static const BaseType_t app_cpu = 1;
+#endif
+
+// --- LCD ---
+// Inicializa la pantalla LCD I2C con dirección 0x27 y tamaño 16x2
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// --- Teclado matricial ---
+// Definición de filas y columnas del keypad 4x4
+const byte ROWS = 4;
+const byte COLS = 4;
+
+// Mapa de teclas del teclado matricial
+char keys[ROWS][COLS] = {
+  {'1', '2', '3', 'A'},
+  {'4', '5', '6', 'B'},
+  {'7', '8', '9', 'C'},
+  {'*', '0', '#', 'D'}
+};
+
+// Pines conectados a las filas y columnas del keypad
+byte rowPins[ROWS] = {1, 42, 41, 40};
+byte colPins[COLS] = {39, 38, 37, 36};
+
+// Objeto de la librería Keypad
+Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
+
+// --- CONFIGURACIÓN DEL JUEGO "SIMÓN DICE" ---
+// Número máximo de teclas en la secuencia
+#define MAX_SEQUENCE 10
+
+// Arreglo que almacena la secuencia aleatoria
+char sequence[MAX_SEQUENCE];
+
+// Nivel actual del jugador (cuántas teclas debe recordar)
+int level = 1;
+
+// --- SINCRONIZACIÓN ENTRE TAREAS ---
+// Semáforos binarios para coordinar las tareas de mostrar y leer
+static SemaphoreHandle_t sem_show_done;  // Indica que la secuencia fue mostrada
+static SemaphoreHandle_t sem_input_done; // Indica que el jugador terminó de ingresar
+
+//*****************************************************************************
+// TAREA 1: Mostrar la secuencia al jugador
+//*****************************************************************************
+void showSequence(void *parameter) {
+  while (1) {
+    // Espera hasta que se libere el semáforo (cuando el jugador haya terminado)
+    xSemaphoreTake(sem_input_done, portMAX_DELAY);
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Secuencia:");
+    vTaskDelay(800 / portTICK_PERIOD_MS);
+
+    // Muestra los caracteres de la secuencia según el nivel actual
+    for (int i = 0; i < level; i++) {
+      lcd.clear();
+      lcd.setCursor(7, 1);
+      lcd.print(sequence[i]);  // Muestra el carácter actual
+      vTaskDelay(600 / portTICK_PERIOD_MS);  // Lo mantiene visible un momento
+      lcd.clear();  // Borra la pantalla
+      vTaskDelay(250 / portTICK_PERIOD_MS);  // Pausa entre cada carácter
+    }
+
+    // Indica al jugador que debe repetir la secuencia
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Tu turno!");
+    // Libera el semáforo para permitir que la tarea de entrada comience
+    xSemaphoreGive(sem_show_done);
+  }
+}
+
+//*****************************************************************************
+// TAREA 2: Leer el teclado y comparar con la secuencia
+//*****************************************************************************
+void readInput(void *parameter) {
+  char key;
+  while (1) {
+    // Espera a que la tarea anterior (mostrar) termine
+    xSemaphoreTake(sem_show_done, portMAX_DELAY);
+    bool correct = true;  // Bandera para verificar si el jugador acierta
+
+    // Lee las teclas del jugador según el nivel actual
+    for (int i = 0; i < level; i++) {
+      // Espera hasta que se presione una tecla
+      do {
+        key = keypad.getKey();
+        vTaskDelay(10 / portTICK_PERIOD_MS);
+      } while (!key);
+
+      // Muestra en pantalla la tecla presionada
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Presionado:");
+      lcd.setCursor(12, 0);
+      lcd.print(key);
+
+      // Compara con la secuencia generada
+      if (key != sequence[i]) {
+        correct = false;  // Si hay error, marca como incorrecto
+        break;
+      }
+
+      vTaskDelay(300 / portTICK_PERIOD_MS);
+    }
+
+    // --- Resultado del intento ---
+    if (correct) {
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Correcto!");
+      vTaskDelay(800 / portTICK_PERIOD_MS);
+
+      // Aumenta el nivel (dificultad)
+      level++;
+      if (level > MAX_SEQUENCE) level = MAX_SEQUENCE;
+    } else {
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Incorrecto!");
+      vTaskDelay(1000 / portTICK_PERIOD_MS);
+
+      // Reinicia el juego al nivel 1
+      level = 1;
+
+      // Regenera una nueva secuencia aleatoria
+      for (int i = 0; i < MAX_SEQUENCE; i++) {
+        int r = random(0, 16); // 16 teclas posibles
+        sequence[i] = keys[r / 4][r % 4];
+      }
+    }
+
+    // Cede el turno nuevamente a la tarea que muestra la secuencia
+    xSemaphoreGive(sem_input_done);
+  }
+}
+
+//*****************************************************************************
+// SETUP - Configuración inicial del programa
+//*****************************************************************************
+void setup() {
+  Serial.begin(115200);
+
+  // Inicializa comunicación I2C con los pines especificados
+  Wire.begin(20, 21);  // SDA = GPIO 20, SCL = GPIO 21
+
+  lcd.init();          // Inicializa el LCD
+  lcd.backlight();     // Enciende la luz de fondo
+
+  randomSeed(analogRead(0)); // Inicializa el generador aleatorio
+
+  // Genera la primera secuencia aleatoria de teclas
+  for (int i = 0; i < MAX_SEQUENCE; i++) {
+    int r = random(0, 16);
+    sequence[i] = keys[r / 4][r % 4];
+  }
+
+  // Crea los semáforos binarios
+  sem_show_done = xSemaphoreCreateBinary();
+  sem_input_done = xSemaphoreCreateBinary();
+
+  // Da inicio al juego liberando el semáforo de entrada
+  xSemaphoreGive(sem_input_done);
+
+  // --- Creación de tareas en FreeRTOS ---
+  xTaskCreatePinnedToCore(showSequence, "MostrarSecuencia", 2048, NULL, 1, NULL, app_cpu);
+  xTaskCreatePinnedToCore(readInput, "LeerTeclado", 4096, NULL, 1, NULL, app_cpu);
+
+  // Mensaje inicial en pantalla
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Simon Dice");
+  vTaskDelay(1000 / portTICK_PERIOD_MS);
+}
+
+//*****************************************************************************
+// LOOP principal (no se usa porque las tareas manejan todo el flujo)
+//*****************************************************************************
+void loop() {
+  vTaskDelay(1000 / portTICK_PERIOD_MS);
+}
