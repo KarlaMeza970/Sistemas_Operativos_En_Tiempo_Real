@@ -1,0 +1,207 @@
+/* Secuencia RTOS - Valvulas y sensores
+   10 pines:
+   VA_led    -> abre/cierra Válvula A (OUTPUT)
+   SP1_btn   -> setpoint 1 (BUTTON)
+   VB_led    -> Válvula B (OUTPUT)
+   SP2_btn   -> setpoint 2 (BUTTON)
+   V2_led    -> Válvula V2 (OUTPUT)
+   SP0_btn   -> setpoint 0 (BUTTON)
+   V1_led    -> Válvula V1 (OUTPUT)
+   DL_HIGH_btn -> detector nivel alto (BUTTON)
+   M_motor   -> motor (OUTPUT)
+   DL_LOW_btn  -> detector nivel bajo (BUTTON)
+*/
+
+#include <Arduino.h>
+
+// ======= CONFIGURACIÓN DE PINES =======
+const int PIN_VA_LED     = 2;   // VA led activo (salida)
+const int PIN_SP1_BTN    = 15;  // SP1 boton (entrada)
+const int PIN_VB_LED     = 4;   // VB led activo
+const int PIN_SP2_BTN    = 16;  // SP2 boton
+const int PIN_V2_LED     = 17;  // V2 led activo
+const int PIN_SP0_BTN    = 5;   // SP0 boton
+const int PIN_V1_LED     = 18;  // V1 led activo
+const int PIN_DL_HIGH_BTN= 19;  // DL alto boton
+const int PIN_MOTOR      = 21;  // Enciende M (salida)
+const int PIN_DL_LOW_BTN = 22;  // DL bajo boton
+
+// Si tus botones son ACTIVE_HIGH cambia a HIGH
+const int BUTTON_ACTIVE_LEVEL = LOW;   // LOW -> botones con INPUT_PULLUP (activo = 0)
+const bool USE_PULLUP = true;          // true si usas INPUT_PULLUP
+
+// Debounce
+const uint32_t DEBOUNCE_MS = 40;
+
+// ======= MÁQUINA DE ESTADOS =======
+enum SystemState {
+  S_IDLE,
+  S_OPEN_VA_WAIT_SP1,
+  S_OPEN_VB_WAIT_SP2,
+  S_OPEN_V2_WAIT_SP0,
+  S_OPEN_V1_WAIT_DL_HIGH,
+  S_MOTOR_RUN_WAIT_DL_LOW,
+  S_DONE
+};
+
+volatile SystemState currentState = S_IDLE;
+
+// ======= FUNCIONES AUXILIARES =======
+bool readButtonDebounced(int pin) {
+  // Lectura simple con debounce blocking (rápida). No bloquea mucho.
+  int stable = digitalRead(pin);
+  uint32_t t0 = millis();
+  while (millis() - t0 < DEBOUNCE_MS) {
+    if (digitalRead(pin) != stable) {
+      // valor cambió durante el periodo, reiniciamos conteo
+      stable = digitalRead(pin);
+      t0 = millis();
+    }
+    // pequeña espera para no hoggear CPU
+    delayMicroseconds(500);
+  }
+  return (stable == BUTTON_ACTIVE_LEVEL);
+}
+
+void setValve(int pin, bool open) {
+  digitalWrite(pin, open ? HIGH : LOW);
+}
+
+// ======= TAREA DE CONTROL (máquina de estados) =======
+void controlTask(void * pvParameters) {
+  (void) pvParameters;
+  for (;;) {
+    switch (currentState) {
+      case S_IDLE:
+        // Iniciar secuencia: abrir VA y esperar SP1
+        setValve(PIN_VA_LED, true);
+        setValve(PIN_VB_LED, false);
+        setValve(PIN_V2_LED, false);
+        setValve(PIN_V1_LED, false);
+        digitalWrite(PIN_MOTOR, LOW);
+        currentState = S_OPEN_VA_WAIT_SP1;
+        break;
+
+      case S_OPEN_VA_WAIT_SP1:
+        if (readButtonDebounced(PIN_SP1_BTN)) {
+          // Llegó SP1: cerrar VA y abrir VB
+          setValve(PIN_VA_LED, false);
+          setValve(PIN_VB_LED, true);
+          currentState = S_OPEN_VB_WAIT_SP2;
+          // Pequeña espera para evitar rebotes repetidos
+          vTaskDelay(pdMS_TO_TICKS(200));
+        } else {
+          // espera corta en RTOS friendly
+          vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        break;
+
+      case S_OPEN_VB_WAIT_SP2:
+        if (readButtonDebounced(PIN_SP2_BTN)) {
+          setValve(PIN_VB_LED, false);
+          setValve(PIN_V2_LED, true);
+          currentState = S_OPEN_V2_WAIT_SP0;
+          vTaskDelay(pdMS_TO_TICKS(200));
+        } else {
+          vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        break;
+
+      case S_OPEN_V2_WAIT_SP0:
+        if (readButtonDebounced(PIN_SP0_BTN)) {
+          setValve(PIN_V2_LED, false);
+          setValve(PIN_V1_LED, true);
+          currentState = S_OPEN_V1_WAIT_DL_HIGH;
+          vTaskDelay(pdMS_TO_TICKS(200));
+        } else {
+          vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        break;
+
+      case S_OPEN_V1_WAIT_DL_HIGH:
+        if (readButtonDebounced(PIN_DL_HIGH_BTN)) {
+          // DL alto: encender motor para mezclar y vaciar
+          digitalWrite(PIN_MOTOR, HIGH);
+          currentState = S_MOTOR_RUN_WAIT_DL_LOW;
+          vTaskDelay(pdMS_TO_TICKS(200));
+        } else {
+          vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        break;
+
+      case S_MOTOR_RUN_WAIT_DL_LOW:
+        if (readButtonDebounced(PIN_DL_LOW_BTN)) {
+          // Detenemos motor y cerramos V1
+          digitalWrite(PIN_MOTOR, LOW);
+          setValve(PIN_V1_LED, false);
+          currentState = S_DONE;
+          vTaskDelay(pdMS_TO_TICKS(200));
+        } else {
+          vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        break;
+
+      case S_DONE:
+        // Secuencia completa. Aquí puedes:
+        // - Reiniciar (volver a S_IDLE)
+        // - Mantener apagado hasta intervención
+        // Actualmente reiniciamos pasados 1 segundo
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        currentState = S_IDLE;
+        break;
+    } // switch
+  } // for
+}
+
+// ======= SETUP / LOOP =======
+void setupPins() {
+  // Salidas
+  pinMode(PIN_VA_LED, OUTPUT);
+  pinMode(PIN_VB_LED, OUTPUT);
+  pinMode(PIN_V2_LED, OUTPUT);
+  pinMode(PIN_V1_LED, OUTPUT);
+  pinMode(PIN_MOTOR, OUTPUT);
+
+  // Entradas botones
+  if (USE_PULLUP) {
+    pinMode(PIN_SP1_BTN, INPUT_PULLUP);
+    pinMode(PIN_SP2_BTN, INPUT_PULLUP);
+    pinMode(PIN_SP0_BTN, INPUT_PULLUP);
+    pinMode(PIN_DL_HIGH_BTN, INPUT_PULLUP);
+    pinMode(PIN_DL_LOW_BTN, INPUT_PULLUP);
+  } else {
+    pinMode(PIN_SP1_BTN, INPUT);
+    pinMode(PIN_SP2_BTN, INPUT);
+    pinMode(PIN_SP0_BTN, INPUT);
+    pinMode(PIN_DL_HIGH_BTN, INPUT);
+    pinMode(PIN_DL_LOW_BTN, INPUT);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  setupPins();
+
+  // Inicializamos salidas en OFF
+  setValve(PIN_VA_LED, false);
+  setValve(PIN_VB_LED, false);
+  setValve(PIN_V2_LED, false);
+  setValve(PIN_V1_LED, false);
+  digitalWrite(PIN_MOTOR, LOW);
+
+  // Creamos la tarea de control
+  xTaskCreate(
+    controlTask,       // función de la tarea
+    "ControlTask",     // nombre
+    4096,              // tamaño pila
+    NULL,              // parámetro
+    1,                 // prioridad
+    NULL               // handle
+  );
+
+  // loop() no hace nada
+}
+
+void loop() {
+  delay(1000); // Nada hecho aquí; la lógica está en controlTask
+}
