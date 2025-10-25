@@ -1,0 +1,87 @@
+#if CONFIG_FREERTOS_UNICORE
+  static const BaseType_t app_cpu = 0;
+#else
+  static const BaseType_t app_cpu = 1;
+#endif
+
+// Longitud de las colas
+static const uint8_t msg_queue_len = 5;
+
+// Declaración de colas
+static QueueHandle_t cola_A_B;
+static QueueHandle_t cola_B_A;
+
+// ===== TAREA A =====
+void TareaA(void *parameter) {
+  int valorA = 0;
+  int recibidoB = 0;
+
+  while (1) {
+    // Enviar mensaje a Tarea B
+    if (xQueueSend(cola_A_B, (void *)&valorA, 10) != pdTRUE) {
+      Serial.println("Cola A->B llena");
+    } else {
+      Serial.print("Tarea A envía: ");
+      Serial.println(valorA);
+      valorA++;
+    }
+
+    // Esperar respuesta de Tarea B
+    if (xQueueReceive(cola_B_A, (void *)&recibidoB, 1000 / portTICK_PERIOD_MS) == pdTRUE) {
+      Serial.print("Tarea A recibe de B: ");
+      Serial.println(recibidoB);
+    }
+
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+  }
+}
+
+// ===== TAREA B =====
+void TareaB(void *parameter) {
+  int recibidoA = 0;
+  int respuestaB = 100;
+
+  while (1) {
+    // Esperar mensaje de Tarea A
+    if (xQueueReceive(cola_A_B, (void *)&recibidoA, 1000 / portTICK_PERIOD_MS) == pdTRUE) {
+      Serial.print("Tarea B recibe de A: ");
+      Serial.println(recibidoA);
+
+      // Enviar respuesta a Tarea A
+      if (xQueueSend(cola_B_A, (void *)&respuestaB, 10) != pdTRUE) {
+        Serial.println("Cola B->A llena");
+      } else {
+        Serial.print("Tarea B envía: ");
+        Serial.println(respuestaB);
+        respuestaB++;
+      }
+    }
+
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+  }
+}
+
+// ===== SETUP =====
+void setup() {
+  Serial.begin(115200);
+  vTaskDelay(1000 / portTICK_PERIOD_MS);
+  Serial.println("Inicio del programa FreeRTOS");
+
+  // Crear colas
+  cola_A_B = xQueueCreate(msg_queue_len, sizeof(int));
+  cola_B_A = xQueueCreate(msg_queue_len, sizeof(int));
+
+  if (cola_A_B == NULL || cola_B_A == NULL) {
+    Serial.println("Error creando colas");
+    while (1);
+  }
+
+  // Crear tareas
+  xTaskCreatePinnedToCore(TareaA, "TareaA", 2048, NULL, 1, NULL, app_cpu);
+  xTaskCreatePinnedToCore(TareaB, "TareaB", 2048, NULL, 1, NULL, app_cpu);
+}
+
+// ===== LOOP VACÍO =====
+void loop() {
+  // No se usa en FreeRTOS
+}
