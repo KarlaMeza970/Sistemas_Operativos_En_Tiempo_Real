@@ -1,1 +1,187 @@
+#include <Arduino.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+ 
+// --- CONFIGURACIÓN DE NÚCLEO (BEST PRACTICE) ---
+#if CONFIG_FREERTOS_UNICORE
+  static const BaseType_t app_cpu = 0;
+#else
+  static const BaseType_t app_cpu = 1;
+#endif
+ 
+// Declaración de los puertos 
+const int Encoder_CHA = 18; //Configuración del encoder A Phase
+const int Encoder_CHB = 19; //Configuración del encoder B Phase
+const int Motor_POS = 25; //Configuración del motor lado positivo
+const int Motor_NEG= 26; //Configuración del motor lado negativo
+ 
+// Configuración del PWM para la frecuencia y la resolución 
+const int PWM_FREQ = 20000;      // Parámetro de freceuncia de 20 KHz, manipulación de la señal.
+const int PWM_RES = 8;           // Parámetro de resolución de 8 bits (0-255), niveles de potencia.
+ 
+volatile long Np = 0; //Variable global para el conteo de pulsos del encoder.
 
+//***********Variables Compartidas************//
+float th_des = 0;   //Setpoint        
+float th_actual_debug = 0; //Actualización del nuevo Setpoint 
+float pwm_debug = 0; //Valor de la señal de control que genera el PID antes de enviarlo al motor    
+ 
+SemaphoreHandle_t xMutexConsigna; 
+portMUX_TYPE muxEncoder = portMUX_INITIALIZER_UNLOCKED;
+ 
+const float R = 0.02406;   //Resolución 
+const float alpha = 0.05;  //Parámetro del filtro derivativo.
+
+// Ganancias PID
+const float kp = 2.8; //Proprcional que nos ayuda en la fuerza y rapidez.
+const float kd = 0.4; //Derivativo  que nos ayuda en el amortiguamiento.
+const float ki = 0.06;//Integral que nos ayuda en la presisción final.
+ 
+
+//********** INTERRUPCIONES**************
+
+//Primera interrupcion cada vez que el canal A detecta un pulso, normalmente en flanco de subida.
+void IRAM_ATTR ISR_Encoder_CHA() {
+    portENTER_CRITICAL_ISR(&muxEncoder); //Evita que otra interriupción modifique Np al mismo tiempo
+    if (digitalRead(Encoder_CHB) == LOW) { //Lectrura del estado del canal
+        Np++; //Incremento del motor
+    } else {
+        Np--; //Decremento del motor
+    }
+    portEXIT_CRITICAL_ISR(&muxEncoder);
+}
+
+//Segunda interrupcion cada vez que el canal B detecta un pulso.
+    portENTER_CRITICAL_ISR(&muxEncoder);
+    if (digitalRead(Encoder_CHA) == HIGH) {
+        Np++;
+    } else {
+        Np--;
+    }
+    portEXIT_CRITICAL_ISR(&muxEncoder);
+}
+ 
+// TARAE 1 : Control en tiempo Real
+void TaskPID(void *pvParameters) {
+    float th = 0, thp = 0; //Posición actual y posisición anterior.        
+    float dth_d = 0, dth_f = 0; //Velovidad derivada (th_d) y velocidad filtrada (th_f) 
+    float e = 0, de = 0, inte = 0;//Error y sus derivada e intergal.  
+    float u = 0, usat = 0; //Señal PID y señal saturada          
+    float PWM = 0;//Señal filtrada convertida a rango PWM                   
+    long Np_local = 0;               
+ 
+    const int dt_ms = 2; //Periodo           
+    const float dt = dt_ms * 0.001; //Convertidor a segundos.
+    TickType_t xLastWakeTime;       
+    xLastWakeTime = xTaskGetTickCount();
+    for (;;) { 
+        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(dt_ms));
+ 
+        // 1. Lectura Segura
+        /*NOTA: Cambiamos la variable compartida Np dentro de una sección crítica para evitar
+        que la ISR la modifique mientras la leemos.*/
+
+        portENTER_CRITICAL(&muxEncoder); 
+        Np_local = Np; 
+        portEXIT_CRITICAL(&muxEncoder);
+ 
+        // 2. Lectura de Consigna
+
+        float target = 0;
+        if(xSemaphoreTake(xMutexConsigna, (TickType_t) 10) == pdTRUE) {
+            target = th_des;
+            xSemaphoreGive(xMutexConsigna);
+        } else {
+            target = th; //Si falla, mantenemos posición actual.
+        }
+ 
+        // 3. Cálculos respecto a la posición y velocidad. 
+        th = R * Np_local;              
+        dth_d = (th - thp) / dt;        
+        dth_f = alpha * dth_d + (1.0 - alpha) * dth_f; //Filtor de primer orden para suavizar la velocidad.
+ 
+        // 4. PID
+        e = target - th; //Error de posición              
+        de = -dth_f; //Derivada basada en la velocidad filtrada.                   
+        inte = inte + (e * dt); // Integración.         
+        u = (kp * e) + (kd * de) + (ki * inte); //Ley PID
+ 
+        // 5. Saturación de contorl y PWM 
+        usat = constrain(u, -12.0, 12.0); //Limite voltaje de nuetro motor
+        PWM = usat * 21.25;  //Conversión.             
+ 
+        // 6. Acciónamiento del motor
+        int pwm_out = abs(PWM); 
+        if (pwm_out > 255) pwm_out = 255; //Limite del PWM 
+ 
+        if (PWM > 0) {
+            // Escribimos directamente al PIN, no al canal
+            ledcWrite(PIN_MOTOR_1, pwm_out);
+            ledcWrite(PIN_MOTOR_2, 0);
+        } else {
+            ledcWrite(PIN_MOTOR_1, 0);
+            ledcWrite(PIN_MOTOR_2, pwm_out);
+        }
+ 
+        // 7. Actualizar
+        thp = th; 
+        th_actual_debug = th;
+        pwm_debug = PWM;
+    }
+}
+ 
+// TAREA 2: Comunicación serial.
+
+
+void TaskSerial(void *pvParameters) {
+    String inputString = "";
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+ 
+        if (Serial.available() > 0) {
+            inputString = Serial.readStringUntil('\n'); //Recibe el Setpoint
+            float nueva_consigna = inputString.toFloat(); //Conversión de texto a númerico
+ 
+            if(xSemaphoreTake(xMutexConsigna, (TickType_t) 10) == pdTRUE) {
+                th_des = nueva_consigna; //Actualiza Setpoint
+                xSemaphoreGive(xMutexConsigna);
+            }
+        }
+        Serial.print(th_actual_debug);
+        Serial.print(",");
+        Serial.println(pwm_debug);
+    }
+}
+ 
+/****************************************************/
+void setup() {
+    /*Inicializa el puerto serie*/
+    Serial.begin(115200);
+    /* Configuración de entradas del encoder con pull-up*/
+    pinMode(Encoder_CHA, INPUT_PULLUP); 
+    pinMode(Encoder_CHB, INPUT_PULLUP);
+
+    /*Inicializa PWM en los pines con la API*/
+
+    if (!ledcAttach(PIN_MOTOR_1, PWM_FREQ, PWM_RES)) {
+        Serial.println("Error configurando PWM Motor 1");
+    }
+    if (!ledcAttach(PIN_MOTOR_2, PWM_FREQ, PWM_RES)) {
+        Serial.println("Error configurando PWM Motor 2");
+    }
+ /*Asocia las ISRs al flanco de subida (RISING) de cada pin*/
+    attachInterrupt(digitalPinToInterrupt(Encoder_CHA), ISR_Encoder_A, RISING);
+    attachInterrupt(digitalPinToInterrupt(Encoder_CHB), ISR_Encoder_B, RISING);
+ 
+    xMutexConsigna = xSemaphoreCreateMutex();
+ 
+    /*Crea el mutex y las dos tareas, fijadas al core app_cpu.
+     TaskPID prioridad 2 (más alta), TaskSerial prioridad 1.*/
+    xTaskCreatePinnedToCore(TaskPID, "PID_Control", 4096, NULL, 2, NULL, app_cpu);
+    xTaskCreatePinnedToCore(TaskSerial, "Serial_Com", 4096, NULL, 1, NULL, app_cpu);
+    Serial.println("Sistema PID RTOS Iniciado (Core v3.0)...");
+}
+ 
+void loop() {
+    vTaskDelete(NULL); 
+}
